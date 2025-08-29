@@ -57,3 +57,23 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+# Environment and configuration files
+.env
+.env.local
+.env.production
+.env.staging
+
+# Apache and deployment files
+*.conf
+apache-config.conf
+
+# SSL certificates
+*.pem
+*.crt
+*.key
+*.p12
+
+# Deployment scripts (keep template)
+deploy.sh
+!deploy.sh.example
