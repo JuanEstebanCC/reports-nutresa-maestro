@@ -13,6 +13,9 @@ class ReportRow(BaseModel):
     incentivo_asignado: Optional[float] = None  # Assigned incentive
     incentivo_distribuido: Optional[float] = None  # Distributed incentive
     porcentaje_variables_completadas: Optional[float] = None  # Variables completion percentage
+    porcentaje_ejecucion_incentivo: Optional[float] = None  # Incentive execution percentage (PHP logic)
+    user_id: Optional[int] = None  # User ID (for frontend compatibility)
+    program_id: Optional[int] = None  # Program ID (for frontend compatibility)
 
 class ReportResponse(BaseModel):
     data: List[Dict[str, Any]]

@@ -18,7 +18,7 @@ class ExcelService:
         headers = [
             "Código de Agente", "Nombre del Agente", "Período de Tiempo", "Variable",
             "Meta Asignada", "Meta Distribuida", "% Meta", "Incentivo Asignado",
-            "Incentivo Distribuido", "% Variables Completadas"
+            "Incentivo Distribuido", "% Incentivo Ejecutado", "% Variables Completadas"
         ]
         
         # Style for headers
@@ -45,6 +45,7 @@ class ExcelService:
                 f"{report_row.get('porcentaje_meta', 0)}%" if report_row.get('porcentaje_meta') is not None else "0.00%",
                 report_row.get("incentivo_asignado", 0),
                 report_row.get("incentivo_distribuido", 0),
+                f"{report_row.get('porcentaje_ejecucion_incentivo', 0)}%" if report_row.get('porcentaje_ejecucion_incentivo') is not None else "0.00%",
                 f"{report_row.get('porcentaje_variables_completadas', 0)}%" if report_row.get('porcentaje_variables_completadas') is not None else "0.00%"
             ]
             

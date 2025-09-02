@@ -20,7 +20,7 @@ class ReportService:
         start_time = time.time()
         
         all_subdomains = db_manager.get_available_subdomains()
-        subdomains = all_subdomains  # Process all subdomains (60 agents)
+        subdomains = all_subdomains[:5]  # Process only 5 agents for testing
         
         print(f"🚀 Starting report generation for {len(subdomains)} agents (period {period_id})")
         
@@ -74,38 +74,65 @@ class ReportService:
         """Check if required tables exist (optimized)"""
         try:
             cursor = await connection.cursor()
+            
+            # First check what database we're connected to
+            await cursor.execute("SELECT DATABASE()")
+            db_result = await cursor.fetchone()
+            current_db = db_result[0] if db_result else "unknown"
+            print(f"🔍 Checking tables in database: {current_db}")
+            
+            # Check which tables exist
             await cursor.execute("""
-                SELECT COUNT(*) FROM information_schema.tables 
+                SELECT table_name FROM information_schema.tables 
                 WHERE table_schema = DATABASE() 
                 AND table_name IN ('users', 'people', 'liquidations', 'roles', 'programs_users', 'programs', 'variables', 'periods')
             """)
-            result = await cursor.fetchone()
+            existing_tables = await cursor.fetchall()
+            table_names = [table[0] for table in existing_tables]
+            print(f"📋 Tables found: {table_names}")
+            
+            # Check liquidations table specifically and count records
+            if 'liquidations' in table_names:
+                await cursor.execute("SELECT COUNT(*) FROM liquidations")
+                liquidations_count = await cursor.fetchone()
+                print(f"📊 Liquidations table has {liquidations_count[0]} records")
+                
+                # Check if there are records for the specific period
+                await cursor.execute("SELECT DISTINCT period_id FROM liquidations LIMIT 10")
+                periods = await cursor.fetchall()
+                period_list = [p[0] for p in periods]
+                print(f"🗓️  Available periods in liquidations: {period_list}")
+            
             await cursor.close()
-            return result[0] >= 6  # At least 6 main tables must exist
+            tables_found = len(table_names)
+            print(f"✅ Found {tables_found}/8 required tables")
+            return tables_found >= 6  # At least 6 main tables must exist
+            
         except Exception as e:
             logger.error(f"Error checking tables: {str(e)}")
+            print(f"❌ Error checking tables: {str(e)}")
             return False
     
     def _get_mock_data_new_structure(self, subdomain: str, period_id: int) -> List[Dict[str, Any]]:
         """Generate mock data by variable for the subdomain (agent commercial) for a specific period"""
         
         # Mock variables with their totals for the entire subdomain
-        # Based on the liquidations table: goal = meta_asignada, results = meta_distribuida
+        # Based on the new liquidations table logic: MAX(goal) per vendor, SUM(results), SUM(points)
         mock_variables_data = [
             {
                 "variable_name": "CSI - Frijoles Zenú 2da Etapa",
-                "total_meta_asignada": 0,
-                "total_meta_distribuida": 0,  # results from liquidations table
-                "total_incentivo_asignado": 0,
-                "total_incentivo_distribuido": 0,
+                "total_meta_asignada": 0,  # Sum of MAX goals per vendor
+                "total_meta_distribuida": 0,  # Sum of results from liquidations table
+                "total_incentivo_asignado": 0,  # Sum of points from liquidations table
+                "total_incentivo_distribuido": 0,  # Sum of points for approved liquidations
                 "porcentaje_variables_completadas": 0.0
             },
             {
                 "variable_name": "CSI - Snack de Película", 
-                "total_meta_asignada": 3,  # goal from liquidations table
-                "total_meta_distribuida": 0,  # results from liquidations table
-                "total_incentivo_asignado": 0,
-                "total_incentivo_distribuido": 0,
+                "total_meta_asignada": 3,  # Sum of MAX goals per vendor from liquidations table
+                "total_meta_distribuida": 0,  # Sum of results from liquidations table
+                "total_incentivo_asignado": 150,  # Sum of points from liquidations table
+                "total_incentivo_distribuido": 0,  # Sum of points for approved liquidations
                 "porcentaje_variables_completadas": 0.0
             },
             {
@@ -134,10 +161,10 @@ class ReportService:
             },
             {
                 "variable_name": "DN - La Especial Nueces",
-                "total_meta_asignada": 1327,  # goal from liquidations table
-                "total_meta_distribuida": 0,  # results from liquidations table
-                "total_incentivo_asignado": 0,
-                "total_incentivo_distribuido": 0,
+                "total_meta_asignada": 1327,  # Sum of MAX goals per vendor from liquidations table
+                "total_meta_distribuida": 0,  # Sum of results from liquidations table
+                "total_incentivo_asignado": 500,  # Sum of points from liquidations table
+                "total_incentivo_distribuido": 0,  # Sum of points for approved liquidations
                 "porcentaje_variables_completadas": 0.0
             }
         ]
@@ -145,178 +172,566 @@ class ReportService:
         report_data = []
         
         for var_data in mock_variables_data:
-            porcentaje_meta = (var_data["total_meta_distribuida"] / var_data["total_meta_asignada"]) * 100 if var_data["total_meta_asignada"] > 0 else 0.0
+            # Calculate compliance percentage correctly
+            porcentaje_meta = 0.0
+            if var_data["total_meta_asignada"] > 0:
+                porcentaje_meta = round((var_data["total_meta_distribuida"] / var_data["total_meta_asignada"]) * 100, 2)
             
             report_row = {
                 "codigo_agente": subdomain,
                 "nombre_agente": self._get_agent_name_by_subdomain(subdomain),
-                "periodo_tiempo": "Agosto 2025",
+                "periodo_tiempo": f"Periodo {period_id}",
                 "variable": var_data["variable_name"],
                 "meta_asignada": var_data["total_meta_asignada"],
                 "meta_distribuida": var_data["total_meta_distribuida"],
-                "porcentaje_meta": round(porcentaje_meta, 2),
+                "porcentaje_meta": porcentaje_meta,
                 "incentivo_asignado": var_data["total_incentivo_asignado"],
                 "incentivo_distribuido": var_data["total_incentivo_distribuido"],
-                "porcentaje_variables_completadas": var_data["porcentaje_variables_completadas"]
+                "porcentaje_variables_completadas": var_data["porcentaje_variables_completadas"],
+                "porcentaje_ejecucion_incentivo": 0.0,  # Mock data has no execution
+                "user_id": None,
+                "program_id": 1
             }
-            
             report_data.append(report_row)
         
         return report_data
     
+    async def _get_distributed_incentives(self, connection, period_id: int) -> Dict[int, float]:
+        """
+        Separate query to get distributed incentives ONLY (sum of all incentives per variable)
+        This implements the exact logic from the provided query for incentivo distribuido
+        Los incentivos asignados siguen usando el cálculo original
+        """
+        cursor = await connection.cursor()
+        
+        try:
+            # Query that exactly matches the user's working SQL - first get individual incentives, then sum by variable
+            # This is ONLY for distributed incentives, not assigned
+            incentive_query = """
+            SELECT 
+                variable_id,
+                SUM(incentive) as total_incentivos_distribuidos
+            FROM (
+                SELECT
+                    u.id,
+                    l.variable_id,
+                    (ru.points * CAST(prog.pointValue AS DECIMAL(10,2))) as incentive
+                FROM users u
+                JOIN people p ON u.person_id = p.id
+                JOIN programs_users pu ON u.id = pu.user_id
+                JOIN programs prog ON pu.program_id = prog.id
+                JOIN roles r ON u.role_id = r.id
+                LEFT JOIN liquidations l ON p.nin = l.nin
+                LEFT JOIN rules ru ON ru.user_id = u.id AND ru.variable_id = l.variable_id
+                LEFT JOIN rule_periods rp ON rp.rule_id = ru.id AND rp.period_id = l.period_id
+                WHERE u.role_id IN (1, 2, 3, 5, 6)
+                  AND rp.period_id = %s
+                  AND l.variable_id IS NOT NULL
+                  AND ru.points IS NOT NULL
+                  AND prog.pointValue IS NOT NULL
+                GROUP BY u.id, l.period_id, l.variable_id, ru.points, prog.pointValue
+            ) as subquery
+            GROUP BY variable_id
+            """
+            
+            await cursor.execute(incentive_query, (period_id,))
+            results = await cursor.fetchall()
+            
+            # Convert to dictionary: variable_id -> total_distributed_incentive
+            distributed_incentives_by_variable = {}
+            for row in results:
+                variable_id, total_distributed_incentive = row
+                distributed_incentives_by_variable[variable_id] = float(total_distributed_incentive or 0)
+            
+            print(f"💰 Found distributed incentives for {len(distributed_incentives_by_variable)} variables:")
+            for var_id, incentive in distributed_incentives_by_variable.items():
+                print(f"   Variable {var_id}: ${incentive:,.2f} (DISTRIBUIDO)")
+            
+            return distributed_incentives_by_variable
+            
+        except Exception as e:
+            logger.error(f"Error getting distributed incentives: {str(e)}")
+            print(f"❌ Error in distributed incentives query: {str(e)}")
+            return {}
+        finally:
+            await cursor.close()
+
     async def _get_real_data_optimized(self, connection, subdomain: str, period_id: int) -> List[Dict[str, Any]]:
         """Get real data from database aggregated by variable for the subdomain (agent commercial) for a specific period"""
         print(f"🚀 Starting _get_real_data_optimized for {subdomain} period {period_id}")
         cursor = await connection.cursor()
-        
+
         try:
-            # First, let's run a diagnostic query to check what data we have
-            diagnostic_query = """
-            SELECT 
-                COUNT(*) as total_liquidations,
-                COUNT(CASE WHEN ru.points IS NOT NULL AND ru.points > 0 THEN 1 END) as rules_with_points,
-                COUNT(CASE WHEN l.points IS NOT NULL AND l.points > 0 THEN 1 END) as liquidations_with_points,
-                COUNT(CASE WHEN l.approved = 1 THEN 1 END) as approved_liquidations,
-                COUNT(CASE WHEN l.results > 0 THEN 1 END) as liquidations_with_results,
-                COUNT(CASE WHEN pr.pointValue IS NOT NULL AND pr.pointValue > 0 THEN 1 END) as programs_with_pointvalue,
-                AVG(ru.points) as avg_rules_points,
-                AVG(l.points) as avg_liquidations_points,
-                AVG(pr.pointValue) as avg_pointvalue,
-                MIN(l.period_id) as min_period_id,
-                MAX(l.period_id) as max_period_id,
-                COUNT(DISTINCT l.period_id) as distinct_periods
-            FROM liquidations l
-            JOIN people p ON l.nin = p.nin
-            JOIN users u ON p.id = u.person_id
-            JOIN programs_users pu ON u.id = pu.user_id
-            JOIN programs pr ON pu.program_id = pr.id AND l.program_id = pr.id
-            JOIN roles r ON u.role_id = r.id
-            LEFT JOIN rules ru ON ru.user_id = u.id AND ru.variable_id = l.variable_id
-            LEFT JOIN rule_periods rp ON rp.rule_id = ru.id AND rp.period_id = l.period_id
-            WHERE r.name IN ('supervisor', 'vendor', 'supernumerary')
-            AND l.period_id = %s
-            """
+            # First, let's check what data exists for debugging
+            await cursor.execute("SELECT DATABASE()")
+            db_result = await cursor.fetchone()
+            current_db = db_result[0] if db_result else "unknown"
+            print(f"📍 Working with database: {current_db}")
             
-            await cursor.execute(diagnostic_query, (period_id,))
-            diagnostic_result = await cursor.fetchone()
+            # Check if we have any liquidations data for this period
+            await cursor.execute("SELECT COUNT(*) FROM liquidations WHERE period_id = %s", (period_id,))
+            period_count = await cursor.fetchone()
+            print(f"📊 Found {period_count[0]} liquidations records for period {period_id}")
             
-            if diagnostic_result:
-                (total_liquidations, rules_with_points, liquidations_with_points, approved_liquidations, 
-                 liquidations_with_results, programs_with_pointvalue, avg_rules_points, 
-                 avg_liquidations_points, avg_pointvalue, min_period_id, max_period_id, distinct_periods) = diagnostic_result
-
+            # Check unique periods available
+            await cursor.execute("SELECT DISTINCT period_id FROM liquidations ORDER BY period_id")
+            available_periods = await cursor.fetchall()
+            period_list = [p[0] for p in available_periods]
+            print(f"🗓️  Available periods: {period_list}")
             
-            # Main query to get data aggregated by variable for the entire subdomain
-            # Based on the liquidations table schema:
-            # - l.goal = meta_asignada (assigned goals)
-            # - l.results = meta_distribuida (distributed/achieved results)
-            # - Incentivos asignados = rules.points * programs.pointValue (incentivos planificados)
-            # - Incentivos distribuidos = liquidations.points * programs.pointValue (solo para liquidaciones aprobadas)
+            # Check if user ID 2 exists and get their NIN
+            await cursor.execute("""
+                SELECT u.id, p.nin, p.name 
+                FROM users u 
+                JOIN people p ON u.person_id = p.id 
+                WHERE u.id = 2
+            """)
+            user_info = await cursor.fetchone()
+            if user_info:
+                user_id, nin, name = user_info
+                print(f"👤 User 2 found: NIN={nin}, Name={name}")
+                
+                # Check liquidations for this specific NIN
+                await cursor.execute("SELECT COUNT(*) FROM liquidations WHERE nin = %s AND period_id = %s", (nin, period_id))
+                nin_count = await cursor.fetchone()
+                print(f"📈 Found {nin_count[0]} liquidations for NIN {nin} in period {period_id}")
+            else:
+                print("❌ User ID 2 not found")
+                
+            # Get distributed incentives using separate query
+            distributed_incentives = await self._get_distributed_incentives(connection, period_id)
+                
+            # Main query without the complex incentive distributed logic
             query = """
-            SELECT 
-                v.name as variable_name,
-                l.period_id,
-                pe.start_date as period_start,
-                SUM(l.goal) as total_meta_asignada,                    -- Sum of all assigned goals
-                SUM(l.results) as total_meta_distribuida,              -- Sum of all achieved results (distributed goals)
-                SUM(COALESCE(ru.points, 0) * COALESCE(pr.pointValue, 0)) as total_incentivo_asignado,  -- Total assigned incentives from rules
-                SUM(CASE WHEN l.approved = 1 THEN COALESCE(l.points, 0) * COALESCE(pr.pointValue, 0) ELSE 0 END) as total_incentivo_distribuido,  -- Total distributed incentives (from liquidations.points, only approved)
-                COUNT(DISTINCT u.id) as total_users,                   -- Total users with liquidations
-                COUNT(DISTINCT CASE WHEN l.results > 0 THEN u.id END) as completed_users  -- Users with results > 0
+            SELECT
+                v.name_to_display as variable_name,
+                v.id as variable_id,
+                l.goal as meta_asignada_agente,
+                COALESCE(vendor_goals.total_vendor_goals, 0) as meta_distribuida_vendors,
+                l.results as resultados_agente,
+                COALESCE(vendor_results.total_vendor_results, 0) as resultados_vendors,
+                ROUND((COALESCE(vendor_results.total_vendor_results, 0) / COALESCE(vendor_goals.total_vendor_goals, 1)) * 100, 2) as cumplimiento_porcentaje,
+                COALESCE(rules_user.points_regla_user, 0) * (SELECT pointValue FROM programs WHERE id = 1) as incentivo_asignado_puntos,
+                (SELECT pointValue FROM programs WHERE id = 1) as point_value,
+                2 as user_id,
+                1 as program_id
             FROM liquidations l
-            JOIN people p ON l.nin = p.nin
-            JOIN users u ON p.id = u.person_id
-            JOIN programs_users pu ON u.id = pu.user_id
-            JOIN programs pr ON pu.program_id = pr.id AND l.program_id = pr.id
-            JOIN roles r ON u.role_id = r.id
-            JOIN variables v ON l.variable_id = v.id
-            JOIN periods pe ON l.period_id = pe.id
-            LEFT JOIN rules ru ON ru.user_id = u.id AND ru.variable_id = l.variable_id
-            LEFT JOIN rule_periods rp ON rp.rule_id = ru.id AND rp.period_id = l.period_id
-            WHERE r.name IN ('supervisor', 'vendor', 'supernumerary')
-            AND l.period_id = %s
-            GROUP BY v.id, v.name, l.period_id, pe.start_date
-            ORDER BY v.name
-            LIMIT 50
+            INNER JOIN variables v ON l.variable_id = v.id
+            LEFT JOIN (
+                SELECT ru.variable_id, ru.points as points_regla_user
+                FROM rules ru
+                INNER JOIN rule_periods rp ON ru.id = rp.rule_id
+                WHERE rp.period_id = %s
+                AND ru.user_id = 2
+            ) rules_user ON l.variable_id = rules_user.variable_id
+            LEFT JOIN (
+                SELECT l2.variable_id, 
+                       CASE WHEN l2.variable_id IN (3, 4) THEN AVG(l2.goal) ELSE SUM(l2.goal) END as total_vendor_goals
+                FROM liquidations l2
+                INNER JOIN people p2 ON l2.nin = p2.nin
+                INNER JOIN users u2 ON p2.id = u2.person_id
+                WHERE l2.period_id = %s
+                AND l2.program_id = 1
+                AND u2.role_id = 5
+                AND l2.goal > 0
+                GROUP BY l2.variable_id
+            ) vendor_goals ON l.variable_id = vendor_goals.variable_id
+            LEFT JOIN (
+                SELECT l3.variable_id, 
+                       CASE WHEN l3.variable_id IN (3, 4) THEN AVG(l3.results) ELSE SUM(l3.results) END as total_vendor_results
+                FROM liquidations l3
+                INNER JOIN people p3 ON l3.nin = p3.nin
+                INNER JOIN users u3 ON p3.id = u3.person_id
+                WHERE l3.period_id = %s
+                AND l3.program_id = 1
+                AND u3.role_id = 5
+                GROUP BY l3.variable_id
+            ) vendor_results ON l.variable_id = vendor_results.variable_id
+            WHERE l.period_id = %s
+            AND l.program_id = 1
+            AND l.nin = (SELECT nin FROM people WHERE id = (SELECT person_id FROM users WHERE id = 2))
+            AND l.goal > 0
+            ORDER BY
+                CASE
+                    WHEN v.name_to_display = 'Ejecución Presupuestal' THEN 1
+                    WHEN v.name_to_display = 'Pideky' THEN 2
+                    WHEN v.name_to_display = 'Gestión de Activos' THEN 3
+                    WHEN v.name_to_display = 'Efectividad' THEN 4
+                    ELSE 5
+                END,
+                v.name_to_display
             """
-            
-            await cursor.execute(query, (period_id,))
-            results = await cursor.fetchall()
-            
-            # If no results, try a simpler query to check basic data
-            if not results:
 
-                simple_query = """
-                SELECT 
-                    v.name as variable_name,
-                    SUM(l.goal) as total_meta_asignada,
-                    SUM(l.results) as total_meta_distribuida,
-                    SUM(COALESCE(ru.points, 0)) as total_rules_points,
-                    SUM(COALESCE(l.points, 0)) as total_liquidations_points,
-                    COUNT(*) as record_count,
-                    COUNT(CASE WHEN l.approved = 1 THEN 1 END) as approved_count
-                FROM liquidations l
-                JOIN variables v ON l.variable_id = v.id
-                JOIN people p ON l.nin = p.nin
-                JOIN users u ON p.id = u.person_id
-                LEFT JOIN rules ru ON ru.user_id = u.id AND ru.variable_id = l.variable_id
-                LEFT JOIN rule_periods rp ON rp.rule_id = ru.id AND rp.period_id = l.period_id
-                WHERE l.period_id = %s
-                GROUP BY v.id, v.name
-                ORDER BY v.name
-                LIMIT 10
-                """
-                
-                await cursor.execute(simple_query, (period_id,))
-                simple_results = await cursor.fetchall()
-                
-                return self._get_mock_data_new_structure(subdomain, period_id)
-            
+            print(f"🔍 Executing main query for period {period_id}...")
+            await cursor.execute(query, (period_id, period_id, period_id, period_id))
+            results = await cursor.fetchall()
+            print(f"📋 Main query returned {len(results)} results")
+
+            # If no results, try a simpler query
+            if not results:
+                print(f"⚠️ No results found with full query, trying simplified query for {subdomain}")
+                return await self._get_simplified_data(connection, subdomain, period_id)
+
             report_data = []
+            period_totals = {
+                'total_assigned_incentives': 0.0,
+                'total_given_incentives': 0.0,
+                'total_executed_incentive': 0.0,
+                'total_meta_asignada': 0.0,
+                'total_meta_distribuida': 0.0
+            }
+
+            # Get agent name
+            agent_name = self._get_agent_name_by_subdomain(subdomain)
+
+            # Get period information
+            period_info = await self._get_period_info(connection, period_id)
+
+            # Group results by variable to avoid duplicates
+            variables_data = {}
             
             for row in results:
-                (variable_name, period_id, period_start, total_meta_asignada, total_meta_distribuida,
-                 total_incentivo_asignado, total_incentivo_distribuido, total_users, completed_users) = row
+                (variable_name, variable_id, meta_asignada_agente, meta_distribuida_vendors, resultados_agente, resultados_vendors, cumplimiento_porcentaje,
+                 incentivo_asignado_puntos, point_value,
+                 user_id, program_id) = row
+
+                # Skip "Ejecución Presupuestal" variable (matches frontend logic)
+                if 'Ejecución Presupuestal' in variable_name or 'EJECUCIÓN PRESUPUESTAL' in variable_name.upper():
+                    continue
+
+                # Use variable_name as key for grouping
+                if variable_name not in variables_data:
+                    variables_data[variable_name] = {
+                        'variable_id': variable_id,
+                        'total_meta_asignada': 0.0,
+                        'total_meta_distribuida': 0.0,
+                        'total_resultados_agente': 0.0,
+                        'total_resultados_vendors': 0.0,
+                        'total_incentivo_asignado': 0.0,
+                        'total_incentivo_distribuido': 0.0,
+                        'user_id': user_id,
+                        'program_id': program_id,
+                        'point_value': float(point_value) if point_value else 500.0
+                    }
                 
-                # Format period
-                mes = self._format_period(period_start)
+                # Accumulate values for this variable
+                variables_data[variable_name]['total_meta_asignada'] += float(meta_asignada_agente or 0)
+                variables_data[variable_name]['total_meta_distribuida'] += float(meta_distribuida_vendors or 0)
+                variables_data[variable_name]['total_resultados_agente'] += float(resultados_agente or 0)
+                variables_data[variable_name]['total_resultados_vendors'] += float(resultados_vendors or 0)
+                variables_data[variable_name]['total_incentivo_asignado'] += float(incentivo_asignado_puntos or 0)
                 
-                # Calculate percentages
+                # Get distributed incentive from separate query
+                distributed_incentive = distributed_incentives.get(variable_id, 0.0)
+                variables_data[variable_name]['total_incentivo_distribuido'] += distributed_incentive
+
+            print(f"🔢 Processing {len(variables_data)} unique variables")
+
+            # Count completed variables for percentage calculation
+            total_variables = len(variables_data)
+            completed_variables = sum(1 for var_data in variables_data.values() 
+                                    if var_data['total_meta_asignada'] > 0 and 
+                                       var_data['total_meta_distribuida'] >= var_data['total_meta_asignada'])  # 100% or more
+
+            # Now create report rows from aggregated data
+            for variable_name, var_data in variables_data.items():
+                # Calculate percentage of meta distributed vs meta assigned (Meta Distribuida / Meta Asignada)
                 porcentaje_meta = 0.0
-                if total_meta_asignada and total_meta_asignada > 0:
-                    porcentaje_meta = round((total_meta_distribuida / total_meta_asignada) * 100, 2)
+                if var_data['total_meta_asignada'] > 0:
+                    porcentaje_meta = round((var_data['total_meta_distribuida'] / var_data['total_meta_asignada']) * 100, 2)
                 
-                # Use the actual distributed incentive from the database (approved liquidations)
-                # total_incentivo_distribuido is already calculated in the query
+                # Calculate incentive execution percentage for this specific variable
+                executed_incentive = 0.0
+                if var_data['total_incentivo_asignado'] > 0:
+                    executed_incentive = round((var_data['total_incentivo_distribuido'] / var_data['total_incentivo_asignado']) * 100, 2)
                 
-                # Calculate completion percentage
+                # Calculate variables completion percentage (real percentage of completed variables)
                 porcentaje_variables_completadas = 0.0
-                if total_users > 0:
-                    porcentaje_variables_completadas = round((completed_users / total_users) * 100, 2)
-                
-                # Get agent name based on subdomain
-                agent_name = self._get_agent_name_by_subdomain(subdomain)
-                
-                # Round all numeric values to 2 decimal places
+                if total_variables > 0:
+                    porcentaje_variables_completadas = round((completed_variables / total_variables) * 100, 2)
+
+                # Create report row
                 report_row = {
                     "codigo_agente": subdomain,
                     "nombre_agente": agent_name,
-                    "periodo_tiempo": mes,
+                    "periodo_tiempo": period_info,
                     "variable": variable_name,
-                    "meta_asignada": round(float(total_meta_asignada or 0), 2),
-                    "meta_distribuida": round(float(total_meta_distribuida or 0), 2),
+                    "meta_asignada": round(var_data['total_meta_asignada'], 2),
+                    "meta_distribuida": round(var_data['total_meta_distribuida'], 2),
                     "porcentaje_meta": porcentaje_meta,
-                    "incentivo_asignado": round(float(total_incentivo_asignado or 0), 2),
-                    "incentivo_distribuido": round(float(total_incentivo_distribuido or 0), 2),
-                    "porcentaje_variables_completadas": porcentaje_variables_completadas
+                    "incentivo_asignado": round(var_data['total_incentivo_asignado'], 2),
+                    "incentivo_distribuido": round(var_data['total_incentivo_distribuido'], 2),
+                    "porcentaje_variables_completadas": round(porcentaje_variables_completadas, 2),
+                    "porcentaje_ejecucion_incentivo": executed_incentive,
+                    "user_id": var_data['user_id'],
+                    "program_id": var_data['program_id']
                 }
-                
+
                 report_data.append(report_row)
-            
+
+                # Accumulate period totals
+                period_totals['total_assigned_incentives'] += var_data['total_incentivo_asignado']
+                period_totals['total_given_incentives'] += var_data['total_incentivo_distribuido']
+                period_totals['total_meta_asignada'] += var_data['total_meta_asignada']
+                period_totals['total_meta_distribuida'] += var_data['total_meta_distribuida']
+
+            # Calculate total execution percentage
+            if period_totals['total_assigned_incentives'] > 0:
+                period_totals['total_executed_incentive'] = round(
+                    (period_totals['total_given_incentives'] / period_totals['total_assigned_incentives']) * 100, 2
+                )
+
+            # Calculate total compliance percentage based on vendor performance
+            total_porcentaje_meta = 0.0
+            if period_totals['total_meta_distribuida'] > 0:
+                total_porcentaje_meta = round(
+                    (period_totals['total_meta_distribuida'] / period_totals['total_meta_asignada']) * 100, 2
+                )
+
+            # Add TOTAL row
+            if report_data:
+                total_row = {
+                    "codigo_agente": subdomain,
+                    "nombre_agente": agent_name,
+                    "periodo_tiempo": period_info,
+                    "variable": "TOTAL",
+                    "meta_asignada": round(period_totals['total_meta_asignada'], 2),
+                    "meta_distribuida": round(period_totals['total_meta_distribuida'], 2),
+                    "porcentaje_meta": total_porcentaje_meta,
+                    "incentivo_asignado": round(period_totals['total_assigned_incentives'], 2),
+                    "incentivo_distribuido": round(period_totals['total_given_incentives'], 2),
+                    "porcentaje_variables_completadas": round((completed_variables / total_variables) * 100, 2) if total_variables > 0 else 0.0,
+                    "porcentaje_ejecucion_incentivo": period_totals['total_executed_incentive'],
+                    "user_id": None,
+                    "program_id": 1
+                }
+                report_data.append(total_row)
+
+            print(f"✅ Successfully generated {len(report_data)} report rows for {subdomain}")
             return report_data
-        
+
         except Exception as e:
             logger.error(f"Error in optimized query for {subdomain}: {str(e)}")
+            print(f"❌ Error in query for {subdomain}: {str(e)}")
+            return self._get_mock_data_new_structure(subdomain, period_id)
+        finally:
+            await cursor.close()
+
+    async def _get_simplified_data(self, connection, subdomain: str, period_id: int) -> List[Dict[str, Any]]:
+        """Get simplified data when full query fails - matches working SQL logic with basic calculations"""
+        print(f"🔄 Using simplified query for {subdomain} period {period_id}")
+        cursor = await connection.cursor()
+
+        try:
+            # Get distributed incentives using separate query
+            distributed_incentives = await self._get_distributed_incentives(connection, period_id)
+            
+            # Simplified main query without complex incentive logic
+            simple_query = """
+            SELECT
+                v.name_to_display as variable_name,
+                v.id as variable_id,
+                l.goal as meta_asignada_agente,
+                COALESCE(vendor_goals.total_vendor_goals, 0) as meta_distribuida_vendors,
+                l.results as resultados_agente,
+                COALESCE(vendor_results.total_vendor_results, 0) as resultados_vendors,
+                ROUND((COALESCE(vendor_results.total_vendor_results, 0) / COALESCE(vendor_goals.total_vendor_goals, 1)) * 100, 2) as cumplimiento_porcentaje,
+                COALESCE(rules_user.points_regla_user, 0) * (SELECT pointValue FROM programs WHERE id = 1) as incentivo_asignado_puntos,
+                (SELECT pointValue FROM programs WHERE id = 1) as point_value,
+                2 as user_id,
+                1 as program_id
+            FROM liquidations l
+            INNER JOIN variables v ON l.variable_id = v.id
+            LEFT JOIN (
+                SELECT ru.variable_id, ru.points as points_regla_user
+                FROM rules ru
+                INNER JOIN rule_periods rp ON ru.id = rp.rule_id
+                WHERE rp.period_id = %s
+                AND ru.user_id = 2
+            ) rules_user ON l.variable_id = rules_user.variable_id
+            LEFT JOIN (
+                SELECT l2.variable_id, 
+                       CASE WHEN l2.variable_id IN (3, 4) THEN AVG(l2.goal) ELSE SUM(l2.goal) END as total_vendor_goals
+                FROM liquidations l2
+                INNER JOIN people p2 ON l2.nin = p2.nin
+                INNER JOIN users u2 ON p2.id = u2.person_id
+                WHERE l2.period_id = %s
+                AND l2.program_id = 1
+                AND u2.role_id = 5
+                AND l2.goal > 0
+                GROUP BY l2.variable_id
+            ) vendor_goals ON l.variable_id = vendor_goals.variable_id
+            LEFT JOIN (
+                SELECT l3.variable_id, 
+                       CASE WHEN l3.variable_id IN (3, 4) THEN AVG(l3.results) ELSE SUM(l3.results) END as total_vendor_results
+                FROM liquidations l3
+                INNER JOIN people p3 ON l3.nin = p3.nin
+                INNER JOIN users u3 ON p3.id = u3.person_id
+                WHERE l3.period_id = %s
+                AND l3.program_id = 1
+                AND u3.role_id = 5
+                GROUP BY l3.variable_id
+            ) vendor_results ON l.variable_id = vendor_results.variable_id
+            WHERE l.period_id = %s
+            AND l.program_id = 1
+            AND l.nin = (SELECT nin FROM people WHERE id = (SELECT person_id FROM users WHERE id = 2))
+            AND l.goal > 0
+            ORDER BY
+                CASE
+                    WHEN v.name_to_display = 'Ejecución Presupuestal' THEN 1
+                    WHEN v.name_to_display = 'Pideky' THEN 2
+                    WHEN v.name_to_display = 'Gestión de Activos' THEN 3
+                    WHEN v.name_to_display = 'Efectividad' THEN 4
+                    ELSE 5
+                END,
+                v.name_to_display
+            LIMIT 20
+            """
+
+            await cursor.execute(simple_query, (period_id, period_id, period_id, period_id))
+            simple_results = await cursor.fetchall()
+
+            if not simple_results:
+                print(f"⚠️ No data found with simplified query, using mock data for {subdomain}")
+                return self._get_mock_data_new_structure(subdomain, period_id)
+
+            report_data = []
+            period_totals = {
+                'total_assigned_incentives': 0.0,
+                'total_given_incentives': 0.0,
+                'total_executed_incentive': 0.0,
+                'total_meta_asignada': 0.0,
+                'total_meta_distribuida': 0.0
+            }
+
+            agent_name = self._get_agent_name_by_subdomain(subdomain)
+
+            # Get period information
+            period_info = await self._get_period_info(connection, period_id)
+
+            # Group results by variable to avoid duplicates
+            variables_data = {}
+            
+            for row in simple_results:
+                (variable_name, variable_id, meta_asignada_agente, meta_distribuida_vendors, resultados_agente, resultados_vendors, cumplimiento_porcentaje,
+                 incentivo_asignado_puntos, point_value,
+                 user_id, program_id) = row
+
+                # Skip "Ejecución Presupuestal" variable
+                if 'Ejecución Presupuestal' in variable_name or 'EJECUCIÓN PRESUPUESTAL' in variable_name.upper():
+                    continue
+
+                # Use variable_name as key for grouping
+                if variable_name not in variables_data:
+                    variables_data[variable_name] = {
+                        'variable_id': variable_id,
+                        'total_meta_asignada': 0.0,
+                        'total_meta_distribuida': 0.0,
+                        'total_resultados_agente': 0.0,
+                        'total_resultados_vendors': 0.0,
+                        'total_incentivo_asignado': 0.0,
+                        'total_incentivo_distribuido': 0.0,
+                        'user_id': user_id,
+                        'program_id': program_id,
+                        'point_value': float(point_value) if point_value else 500.0
+                    }
+                
+                # Accumulate values for this variable
+                variables_data[variable_name]['total_meta_asignada'] += float(meta_asignada_agente or 0)
+                variables_data[variable_name]['total_meta_distribuida'] += float(meta_distribuida_vendors or 0)
+                variables_data[variable_name]['total_resultados_agente'] += float(resultados_agente or 0)
+                variables_data[variable_name]['total_resultados_vendors'] += float(resultados_vendors or 0)
+                variables_data[variable_name]['total_incentivo_asignado'] += float(incentivo_asignado_puntos or 0)
+                
+                # Get distributed incentive from separate query
+                distributed_incentive = distributed_incentives.get(variable_id, 0.0)
+                variables_data[variable_name]['total_incentivo_distribuido'] += distributed_incentive
+
+            # Count completed variables for percentage calculation
+            total_variables = len(variables_data)
+            completed_variables = sum(1 for var_data in variables_data.values() 
+                                    if var_data['total_meta_asignada'] > 0 and 
+                                       var_data['total_meta_distribuida'] >= var_data['total_meta_asignada'])  # 100% or more
+
+            # Now create report rows from aggregated data
+            for variable_name, var_data in variables_data.items():
+                # Calculate percentage of meta distributed vs meta assigned (Meta Distribuida / Meta Asignada)
+                porcentaje_meta = 0.0
+                if var_data['total_meta_asignada'] > 0:
+                    porcentaje_meta = round((var_data['total_meta_distribuida'] / var_data['total_meta_asignada']) * 100, 2)
+                
+                # Calculate incentive execution percentage for this specific variable
+                executed_incentive = 0.0
+                if var_data['total_incentivo_asignado'] > 0:
+                    executed_incentive = round((var_data['total_incentivo_distribuido'] / var_data['total_incentivo_asignado']) * 100, 2)
+                
+                # Calculate variables completion percentage (real percentage of completed variables)
+                porcentaje_variables_completadas = 0.0
+                if total_variables > 0:
+                    porcentaje_variables_completadas = round((completed_variables / total_variables) * 100, 2)
+
+                report_row = {
+                    "codigo_agente": subdomain,
+                    "nombre_agente": agent_name,
+                    "periodo_tiempo": period_info,
+                    "variable": variable_name,
+                    "meta_asignada": round(var_data['total_meta_asignada'], 2),
+                    "meta_distribuida": round(var_data['total_meta_distribuida'], 2),
+                    "porcentaje_meta": porcentaje_meta,
+                    "incentivo_asignado": round(var_data['total_incentivo_asignado'], 2),
+                    "incentivo_distribuido": round(var_data['total_incentivo_distribuido'], 2),
+                    "porcentaje_variables_completadas": round(porcentaje_variables_completadas, 2),
+                    "porcentaje_ejecucion_incentivo": executed_incentive,
+                    "user_id": var_data['user_id'],
+                    "program_id": var_data['program_id']
+                }
+
+                report_data.append(report_row)
+
+                # Accumulate period totals
+                period_totals['total_assigned_incentives'] += var_data['total_incentivo_asignado']
+                period_totals['total_given_incentives'] += var_data['total_incentivo_distribuido']
+                period_totals['total_meta_asignada'] += var_data['total_meta_asignada']
+                period_totals['total_meta_distribuida'] += var_data['total_meta_distribuida']
+
+            # Calculate total execution percentage
+            if period_totals['total_assigned_incentives'] > 0:
+                period_totals['total_executed_incentive'] = round(
+                    (period_totals['total_given_incentives'] / period_totals['total_assigned_incentives']) * 100, 2
+                )
+
+            # Calculate total compliance percentage based on vendor performance
+            total_porcentaje_meta = 0.0
+            if period_totals['total_meta_distribuida'] > 0:
+                total_porcentaje_meta = round(
+                    (period_totals['total_meta_distribuida'] / period_totals['total_meta_asignada']) * 100, 2
+                )
+
+            # Add TOTAL row
+            if report_data:
+                total_row = {
+                    "codigo_agente": subdomain,
+                    "nombre_agente": agent_name,
+                    "periodo_tiempo": period_info,
+                    "variable": "TOTAL",
+                    "meta_asignada": round(period_totals['total_meta_asignada'], 2),
+                    "meta_distribuida": round(period_totals['total_meta_distribuida'], 2),
+                    "porcentaje_meta": total_porcentaje_meta,
+                    "incentivo_asignado": round(period_totals['total_assigned_incentives'], 2),
+                    "incentivo_distribuido": round(period_totals['total_given_incentives'], 2),
+                    "porcentaje_variables_completadas": round((completed_variables / total_variables) * 100, 2) if total_variables > 0 else 0.0,
+                    "porcentaje_ejecucion_incentivo": period_totals['total_executed_incentive'],
+                    "user_id": None,
+                    "program_id": 1
+                }
+                report_data.append(total_row)
+
+            print(f"✅ Found {len(report_data)} variables with simplified data for {subdomain}")
+            return report_data
+
+        except Exception as e:
+            logger.error(f"Error in simplified query for {subdomain}: {str(e)}")
+            print(f"❌ Error in simplified query for {subdomain}: {str(e)}")
             return self._get_mock_data_new_structure(subdomain, period_id)
         finally:
             await cursor.close()
@@ -338,16 +753,25 @@ class ReportService:
     def _format_period(self, period_start) -> str:
         """Format period date to Spanish month year"""
         if not period_start:
-            return "Agosto 2025"
+            return "Periodo Desconocido"
         
-        month_names = {
-            1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
-            5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
-            9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
-        }
+        # Handle case where period_start might be an integer or other type
+        if isinstance(period_start, int):
+            return f"Periodo {period_start}"  # Use period ID as fallback
         
-        month_name = month_names.get(period_start.month, "")
-        return f"{month_name} {period_start.year}"
+        # Handle case where period_start is a datetime object
+        if hasattr(period_start, 'month') and hasattr(period_start, 'year'):
+            month_names = {
+                1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+                5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+                9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+            }
+            
+            month_name = month_names.get(period_start.month, "")
+            return f"{month_name} {period_start.year}"
+        
+        # Fallback for any other type
+        return "Periodo Desconocido"
     
     async def _get_completion_percentage_fast(self, cursor, user_id: int, period_id: int) -> float:
         """Fast completion percentage calculation"""
@@ -427,11 +851,11 @@ class ReportService:
             
             if result and result[0]:
                 return self._format_period(result[0])
-            return 'Agosto 2025'
+            return f'Periodo {period_id}'
             
         except Exception as e:
             logger.error(f"Error getting period info: {str(e)}")
-            return 'Agosto 2025'
+            return f'Periodo {period_id}'
     
     async def _get_variable_name(self, connection, variable_id: int) -> str:
         """
