@@ -3,10 +3,61 @@ from app.core.database import db_manager
 from app.models.schemas import ReportRow
 from datetime import datetime
 import logging
+import json
+import os
+import re
 
 logger = logging.getLogger(__name__)
 
 class ReportService:
+    
+    def __init__(self):
+        """Initialize the service and load NIN data"""
+        self.nin_data = self._load_nin_data()
+    
+    def _load_nin_data(self) -> List[Dict[str, str]]:
+        """Load NIN data from nin.json file"""
+        try:
+            nin_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'static', 'nin.json')
+            with open(nin_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data
+        except Exception as e:
+            logger.error(f"Error loading nin.json: {str(e)}")
+            return []
+    
+    def _get_agent_code_by_name(self, agent_name: str) -> str:
+        """Get agent code (NIN) by agent name using regex matching"""
+        if not agent_name or not self.nin_data:
+            return "UNKNOWN"
+        
+        # Normalize the agent name for comparison (remove extra spaces, convert to uppercase)
+        normalized_agent_name = re.sub(r'\s+', ' ', agent_name.strip().upper())
+        
+        for item in self.nin_data:
+            # Normalize the name from JSON for comparison
+            normalized_json_name = re.sub(r'\s+', ' ', item['ac'].strip().upper())
+            
+            # Try exact match first
+            if normalized_agent_name == normalized_json_name:
+                return item['nin']
+            
+            # Try partial match - check if the key words from agent name are in the JSON name
+            agent_words = set(normalized_agent_name.split())
+            json_words = set(normalized_json_name.split())
+            
+            # If most of the important words match (excluding common words)
+            common_words = {'S.A.S', 'SAS', 'S.A', 'SA', 'LTDA', 'AGENCIA'}
+            agent_important_words = agent_words - common_words
+            json_important_words = json_words - common_words
+            
+            if agent_important_words and json_important_words:
+                # Calculate similarity based on important words
+                intersection = agent_important_words.intersection(json_important_words)
+                if len(intersection) >= max(1, len(agent_important_words) * 0.7):  # 70% match threshold
+                    return item['nin']
+        
+        return "UNKNOWN"
     
     async def generate_report(self, period_id: int) -> Dict[str, Any]:
         """
@@ -22,8 +73,6 @@ class ReportService:
         all_subdomains = db_manager.get_available_subdomains()
         subdomains = all_subdomains[:5]  # Process only 5 agents for testing
         
-        print(f"🚀 Starting report generation for {len(subdomains)} agents (period {period_id})")
-        
         for i, subdomain in enumerate(subdomains, 1):
             try:
                 agent_start_time = time.time()
@@ -32,17 +81,11 @@ class ReportService:
                 all_data.extend(subdomain_data)
                 processed_subdomains.append(subdomain)
                 
-                agent_time = time.time() - agent_start_time
-                print(f"✅ Agent {i}/{len(subdomains)} ({subdomain}) completed in {agent_time:.2f}s - {len(subdomain_data)} records")
-                
             except Exception as e:
                 logger.error(f"Error processing subdomain {subdomain}: {str(e)}")
-                print(f"❌ Agent {i}/{len(subdomains)} ({subdomain}) failed: {str(e)}")
                 continue
         
         total_time = time.time() - start_time
-        print(f"🎉 Report generation completed in {total_time:.2f}s")
-        print(f"📊 Total records: {len(all_data)} from {len(processed_subdomains)} agents")
         
         return {
             "data": all_data,
@@ -75,12 +118,6 @@ class ReportService:
         try:
             cursor = await connection.cursor()
             
-            # First check what database we're connected to
-            await cursor.execute("SELECT DATABASE()")
-            db_result = await cursor.fetchone()
-            current_db = db_result[0] if db_result else "unknown"
-            print(f"🔍 Checking tables in database: {current_db}")
-            
             # Check which tables exist
             await cursor.execute("""
                 SELECT table_name FROM information_schema.tables 
@@ -89,28 +126,18 @@ class ReportService:
             """)
             existing_tables = await cursor.fetchall()
             table_names = [table[0] for table in existing_tables]
-            print(f"📋 Tables found: {table_names}")
             
             # Check liquidations table specifically and count records
             if 'liquidations' in table_names:
                 await cursor.execute("SELECT COUNT(*) FROM liquidations")
                 liquidations_count = await cursor.fetchone()
-                print(f"📊 Liquidations table has {liquidations_count[0]} records")
-                
-                # Check if there are records for the specific period
-                await cursor.execute("SELECT DISTINCT period_id FROM liquidations LIMIT 10")
-                periods = await cursor.fetchall()
-                period_list = [p[0] for p in periods]
-                print(f"🗓️  Available periods in liquidations: {period_list}")
             
             await cursor.close()
             tables_found = len(table_names)
-            print(f"✅ Found {tables_found}/8 required tables")
             return tables_found >= 6  # At least 6 main tables must exist
             
         except Exception as e:
             logger.error(f"Error checking tables: {str(e)}")
-            print(f"❌ Error checking tables: {str(e)}")
             return False
     
     def _get_mock_data_new_structure(self, subdomain: str, period_id: int) -> List[Dict[str, Any]]:
@@ -177,9 +204,10 @@ class ReportService:
             if var_data["total_meta_asignada"] > 0:
                 porcentaje_meta = round((var_data["total_meta_distribuida"] / var_data["total_meta_asignada"]) * 100, 2)
             
+            agent_name = self._get_agent_name_by_subdomain(subdomain)
             report_row = {
-                "codigo_agente": subdomain,
-                "nombre_agente": self._get_agent_name_by_subdomain(subdomain),
+                "codigo_agente": self._get_agent_code_by_name(agent_name),
+                "nombre_agente": agent_name,
                 "periodo_tiempo": f"Periodo {period_id}",
                 "variable": var_data["variable_name"],
                 "meta_asignada": var_data["total_meta_asignada"],
@@ -243,61 +271,19 @@ class ReportService:
                 variable_id, total_distributed_incentive = row
                 distributed_incentives_by_variable[variable_id] = float(total_distributed_incentive or 0)
             
-            print(f"💰 Found distributed incentives for {len(distributed_incentives_by_variable)} variables:")
-            for var_id, incentive in distributed_incentives_by_variable.items():
-                print(f"   Variable {var_id}: ${incentive:,.2f} (DISTRIBUIDO)")
-            
             return distributed_incentives_by_variable
             
         except Exception as e:
             logger.error(f"Error getting distributed incentives: {str(e)}")
-            print(f"❌ Error in distributed incentives query: {str(e)}")
             return {}
         finally:
             await cursor.close()
 
     async def _get_real_data_optimized(self, connection, subdomain: str, period_id: int) -> List[Dict[str, Any]]:
         """Get real data from database aggregated by variable for the subdomain (agent commercial) for a specific period"""
-        print(f"🚀 Starting _get_real_data_optimized for {subdomain} period {period_id}")
         cursor = await connection.cursor()
 
         try:
-            # First, let's check what data exists for debugging
-            await cursor.execute("SELECT DATABASE()")
-            db_result = await cursor.fetchone()
-            current_db = db_result[0] if db_result else "unknown"
-            print(f"📍 Working with database: {current_db}")
-            
-            # Check if we have any liquidations data for this period
-            await cursor.execute("SELECT COUNT(*) FROM liquidations WHERE period_id = %s", (period_id,))
-            period_count = await cursor.fetchone()
-            print(f"📊 Found {period_count[0]} liquidations records for period {period_id}")
-            
-            # Check unique periods available
-            await cursor.execute("SELECT DISTINCT period_id FROM liquidations ORDER BY period_id")
-            available_periods = await cursor.fetchall()
-            period_list = [p[0] for p in available_periods]
-            print(f"🗓️  Available periods: {period_list}")
-            
-            # Check if user ID 2 exists and get their NIN
-            await cursor.execute("""
-                SELECT u.id, p.nin, p.name 
-                FROM users u 
-                JOIN people p ON u.person_id = p.id 
-                WHERE u.id = 2
-            """)
-            user_info = await cursor.fetchone()
-            if user_info:
-                user_id, nin, name = user_info
-                print(f"👤 User 2 found: NIN={nin}, Name={name}")
-                
-                # Check liquidations for this specific NIN
-                await cursor.execute("SELECT COUNT(*) FROM liquidations WHERE nin = %s AND period_id = %s", (nin, period_id))
-                nin_count = await cursor.fetchone()
-                print(f"📈 Found {nin_count[0]} liquidations for NIN {nin} in period {period_id}")
-            else:
-                print("❌ User ID 2 not found")
-                
             # Get distributed incentives using separate query
             distributed_incentives = await self._get_distributed_incentives(connection, period_id)
                 
@@ -365,11 +351,9 @@ class ReportService:
             print(f"🔍 Executing main query for period {period_id}...")
             await cursor.execute(query, (period_id, period_id, period_id, period_id))
             results = await cursor.fetchall()
-            print(f"📋 Main query returned {len(results)} results")
 
             # If no results, try a simpler query
             if not results:
-                print(f"⚠️ No results found with full query, trying simplified query for {subdomain}")
                 return await self._get_simplified_data(connection, subdomain, period_id)
 
             report_data = []
@@ -425,8 +409,6 @@ class ReportService:
                 distributed_incentive = distributed_incentives.get(variable_id, 0.0)
                 variables_data[variable_name]['total_incentivo_distribuido'] += distributed_incentive
 
-            print(f"🔢 Processing {len(variables_data)} unique variables")
-
             # Count completed variables for percentage calculation
             total_variables = len(variables_data)
             completed_variables = sum(1 for var_data in variables_data.values() 
@@ -452,7 +434,7 @@ class ReportService:
 
                 # Create report row
                 report_row = {
-                    "codigo_agente": subdomain,
+                    "codigo_agente": self._get_agent_code_by_name(agent_name),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": variable_name,
@@ -491,7 +473,7 @@ class ReportService:
             # Add TOTAL row
             if report_data:
                 total_row = {
-                    "codigo_agente": subdomain,
+                    "codigo_agente": self._get_agent_code_by_name(agent_name),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": "TOTAL",
@@ -507,19 +489,16 @@ class ReportService:
                 }
                 report_data.append(total_row)
 
-            print(f"✅ Successfully generated {len(report_data)} report rows for {subdomain}")
             return report_data
 
         except Exception as e:
             logger.error(f"Error in optimized query for {subdomain}: {str(e)}")
-            print(f"❌ Error in query for {subdomain}: {str(e)}")
             return self._get_mock_data_new_structure(subdomain, period_id)
         finally:
             await cursor.close()
 
     async def _get_simplified_data(self, connection, subdomain: str, period_id: int) -> List[Dict[str, Any]]:
         """Get simplified data when full query fails - matches working SQL logic with basic calculations"""
-        print(f"🔄 Using simplified query for {subdomain} period {period_id}")
         cursor = await connection.cursor()
 
         try:
@@ -592,7 +571,6 @@ class ReportService:
             simple_results = await cursor.fetchall()
 
             if not simple_results:
-                print(f"⚠️ No data found with simplified query, using mock data for {subdomain}")
                 return self._get_mock_data_new_structure(subdomain, period_id)
 
             report_data = []
@@ -671,7 +649,7 @@ class ReportService:
                     porcentaje_variables_completadas = round((completed_variables / total_variables) * 100, 2)
 
                 report_row = {
-                    "codigo_agente": subdomain,
+                    "codigo_agente": self._get_agent_code_by_name(agent_name),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": variable_name,
@@ -710,7 +688,7 @@ class ReportService:
             # Add TOTAL row
             if report_data:
                 total_row = {
-                    "codigo_agente": subdomain,
+                    "codigo_agente": self._get_agent_code_by_name(agent_name),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": "TOTAL",
@@ -726,12 +704,10 @@ class ReportService:
                 }
                 report_data.append(total_row)
 
-            print(f"✅ Found {len(report_data)} variables with simplified data for {subdomain}")
             return report_data
 
         except Exception as e:
             logger.error(f"Error in simplified query for {subdomain}: {str(e)}")
-            print(f"❌ Error in simplified query for {subdomain}: {str(e)}")
             return self._get_mock_data_new_structure(subdomain, period_id)
         finally:
             await cursor.close()
