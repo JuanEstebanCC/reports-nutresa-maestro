@@ -5,7 +5,6 @@ from datetime import datetime
 import logging
 import json
 import os
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +14,8 @@ class ReportService:
         """Initialize the service and load NIN data"""
         self.nin_data = self._load_nin_data()
     
-    def _load_nin_data(self) -> List[Dict[str, str]]:
-        """Load NIN data from nin.json file"""
+    def _load_nin_data(self) -> Dict[str, str]:
+        """Load NIN data from nin.json file - now returns direct mapping of subdomain to NIN"""
         try:
             nin_file_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'static', 'nin.json')
             with open(nin_file_path, 'r', encoding='utf-8') as f:
@@ -24,40 +23,15 @@ class ReportService:
                 return data
         except Exception as e:
             logger.error(f"Error loading nin.json: {str(e)}")
-            return []
+            return {}
     
-    def _get_agent_code_by_name(self, agent_name: str) -> str:
-        """Get agent code (NIN) by agent name using regex matching"""
-        if not agent_name or not self.nin_data:
+    def _get_agent_code_by_subdomain(self, subdomain: str) -> str:
+        """Get agent code (NIN) by subdomain using direct mapping"""
+        if not subdomain or not self.nin_data:
             return "UNKNOWN"
         
-        # Normalize the agent name for comparison (remove extra spaces, convert to uppercase)
-        normalized_agent_name = re.sub(r'\s+', ' ', agent_name.strip().upper())
-        
-        for item in self.nin_data:
-            # Normalize the name from JSON for comparison
-            normalized_json_name = re.sub(r'\s+', ' ', item['ac'].strip().upper())
-            
-            # Try exact match first
-            if normalized_agent_name == normalized_json_name:
-                return item['nin']
-            
-            # Try partial match - check if the key words from agent name are in the JSON name
-            agent_words = set(normalized_agent_name.split())
-            json_words = set(normalized_json_name.split())
-            
-            # If most of the important words match (excluding common words)
-            common_words = {'S.A.S', 'SAS', 'S.A', 'SA', 'LTDA', 'AGENCIA'}
-            agent_important_words = agent_words - common_words
-            json_important_words = json_words - common_words
-            
-            if agent_important_words and json_important_words:
-                # Calculate similarity based on important words
-                intersection = agent_important_words.intersection(json_important_words)
-                if len(intersection) >= max(1, len(agent_important_words) * 0.7):  # 70% match threshold
-                    return item['nin']
-        
-        return "UNKNOWN"
+        # Direct lookup in the mapping
+        return self.nin_data.get(subdomain, "UNKNOWN")
     
     async def generate_report(self, period_id: int) -> Dict[str, Any]:
         """
@@ -206,7 +180,7 @@ class ReportService:
             
             agent_name = self._get_agent_name_by_subdomain(subdomain)
             report_row = {
-                "codigo_agente": self._get_agent_code_by_name(agent_name),
+                "codigo_agente": self._get_agent_code_by_subdomain(subdomain),
                 "nombre_agente": agent_name,
                 "periodo_tiempo": f"Periodo {period_id}",
                 "variable": var_data["variable_name"],
@@ -434,7 +408,7 @@ class ReportService:
 
                 # Create report row
                 report_row = {
-                    "codigo_agente": self._get_agent_code_by_name(agent_name),
+                    "codigo_agente": self._get_agent_code_by_subdomain(subdomain),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": variable_name,
@@ -473,7 +447,7 @@ class ReportService:
             # Add TOTAL row
             if report_data:
                 total_row = {
-                    "codigo_agente": self._get_agent_code_by_name(agent_name),
+                    "codigo_agente": self._get_agent_code_by_subdomain(subdomain),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": "TOTAL",
@@ -649,7 +623,7 @@ class ReportService:
                     porcentaje_variables_completadas = round((completed_variables / total_variables) * 100, 2)
 
                 report_row = {
-                    "codigo_agente": self._get_agent_code_by_name(agent_name),
+                    "codigo_agente": self._get_agent_code_by_subdomain(subdomain),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": variable_name,
@@ -688,7 +662,7 @@ class ReportService:
             # Add TOTAL row
             if report_data:
                 total_row = {
-                    "codigo_agente": self._get_agent_code_by_name(agent_name),
+                    "codigo_agente": self._get_agent_code_by_subdomain(subdomain),
                     "nombre_agente": agent_name,
                     "periodo_tiempo": period_info,
                     "variable": "TOTAL",
