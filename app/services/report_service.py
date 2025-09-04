@@ -71,7 +71,7 @@ class ReportService:
         start_time = time.time()
         
         all_subdomains = db_manager.get_available_subdomains()
-        subdomains = all_subdomains[:5]  # Process only 5 agents for testing
+        subdomains = all_subdomains  # Process all agents
         
         for i, subdomain in enumerate(subdomains, 1):
             try:
