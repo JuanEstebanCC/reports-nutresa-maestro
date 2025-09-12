@@ -6,7 +6,7 @@ import os
 
 class DatabaseManager:
     def __init__(self):
-        self.connections: Dict[str, aiomysql.Connection] = {}
+        # Removed connection caching to prevent stale data
         self.subdomains = self._load_subdomains()
     
     def _load_subdomains(self) -> Dict[str, str]:
@@ -20,38 +20,33 @@ class DatabaseManager:
             return {}
     
     async def get_connection(self, subdomain: str = None) -> aiomysql.Connection:
-        """Get database connection for specific subdomain or master database"""
+        """Get fresh database connection for specific subdomain or master database (no caching)"""
         if subdomain and subdomain in self.subdomains:
             db_name = self.subdomains[subdomain]
         else:
             # Connect to MySQL server without specific database
             db_name = None
         
-        connection_key = f"{subdomain}_{db_name}" if subdomain else "master_connection"
+        # Always create a fresh connection to prevent stale data
+        connection = await aiomysql.connect(
+            host=settings.DB_HOST,
+            port=settings.DB_PORT,
+            user=settings.DB_USER,
+            password=settings.DB_PASSWORD,
+            db=db_name,
+            charset='utf8mb4',
+            autocommit=True
+        )
         
-        if connection_key not in self.connections:
-            connection = await aiomysql.connect(
-                host=settings.DB_HOST,
-                port=settings.DB_PORT,
-                user=settings.DB_USER,
-                password=settings.DB_PASSWORD,
-                db=db_name,
-                charset='utf8mb4',
-                autocommit=True
-            )
-            
-            if connection is None:
-                raise Exception(f"Failed to connect to database: {db_name or 'default'}")
-            
-            self.connections[connection_key] = connection
+        if connection is None:
+            raise Exception(f"Failed to connect to database: {db_name or 'default'}")
         
-        return self.connections[connection_key]
+        return connection
     
     async def close_all_connections(self):
-        """Close all database connections"""
-        for connection in self.connections.values():
-            await connection.close()
-        self.connections.clear()
+        """Close all database connections (no longer needed since we don't cache connections)"""
+        # No longer needed since we create fresh connections each time
+        pass
     
     def get_available_subdomains(self) -> List[str]:
         """Get list of available subdomains"""

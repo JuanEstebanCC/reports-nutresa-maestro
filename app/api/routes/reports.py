@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from app.services.report_service import ReportService
 from app.services.excel_service import ExcelService
 from app.models.schemas import ReportResponse
 import io
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,23 @@ async def generate_report(period_id: int):
             timeout=300.0  # 5 minutes timeout
         )
         
-        return ReportResponse(**report_data)
+        # Create response with cache-busting headers
+        response = ReportResponse(**report_data)
+        
+        # Add cache-busting headers to prevent stale data
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Last-Modified": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()),
+            "ETag": f'"{int(time.time())}-{period_id}"'
+        }
+        
+        return Response(
+            content=response.model_dump_json(),
+            media_type="application/json",
+            headers=headers
+        )
         
     except asyncio.TimeoutError:
         logger.error("Report generation timed out after 5 minutes")
@@ -54,11 +71,21 @@ async def generate_excel_report(period_id: int):
         # Generate Excel file
         excel_buffer = excel_service.create_excel_report(report_data['data'])
         
+        # Add cache-busting headers to prevent stale data
+        headers = {
+            "Content-Disposition": f"attachment; filename=nutresa_report_period_{period_id}_{int(time.time())}.xlsx",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Last-Modified": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime()),
+            "ETag": f'"{int(time.time())}-{period_id}"'
+        }
+        
         # Return Excel file as streaming response
         return StreamingResponse(
             io.BytesIO(excel_buffer),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=nutresa_report_test.xlsx"}
+            headers=headers
         )
         
     except asyncio.TimeoutError:

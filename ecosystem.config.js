@@ -23,6 +23,9 @@ module.exports = {
     max_restarts: 10,
     min_uptime: '10s',
     
+    // Disable any potential caching
+    node_args: '--no-deprecation --max-old-space-size=1024',
+    
     // Logs
     log_file: '/var/log/pm2/nutresa-reports-combined.log',
     out_file: '/var/log/pm2/nutresa-reports-out.log',

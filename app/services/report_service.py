@@ -72,6 +72,7 @@ class ReportService:
         """
         Get report data for a specific subdomain and period following the new structure (optimized)
         """
+        connection = None
         try:
             connection = await db_manager.get_connection(subdomain)
             
@@ -86,6 +87,10 @@ class ReportService:
         except Exception as e:
             logger.error(f"Error processing subdomain {subdomain}: {str(e)}")
             return self._get_mock_data_new_structure(subdomain, period_id)
+        finally:
+            # Always close the connection to prevent stale data
+            if connection:
+                await connection.ensure_closed()
     
     async def _check_tables_exist(self, connection) -> bool:
         """Check if required tables exist (optimized)"""
@@ -690,15 +695,15 @@ class ReportService:
         """Get agent name based on subdomain"""
         agent_names = {
             "1030773": "A.H.H. DISTRIBUCIONES S.A.S",
-            "1089723": "AGENCIA COMERCIAL NUTRICOL SAS",
+            "1089723": "NUTRICOL SAS",
             "comercruz": "COMERCRUZ DISTRIBUCIONES",
             "santiagodetunja": "SANTIAGO DE TUNJA COMERCIAL",
             "maxgol": "MAXGOL DISTRIBUCIONES",
-            "distrimarcasagentecomercial": "DISTRIMARCAS AGENTE COMERCIAL",
+            "distrimarcasagentecomercial": "DISTRIMARCAS",
             "jyddistribuciones": "JYD DISTRIBUCIONES"
         }
         
-        return agent_names.get(subdomain, f"AGENCIA COMERCIAL {subdomain.upper()}")
+        return agent_names.get(subdomain, subdomain.upper())
     
     def _format_period(self, period_start) -> str:
         """Format period date to Spanish month year"""
