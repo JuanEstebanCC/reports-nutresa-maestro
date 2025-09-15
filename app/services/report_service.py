@@ -700,7 +700,8 @@ class ReportService:
             "santiagodetunja": "SANTIAGO DE TUNJA COMERCIAL",
             "maxgol": "MAXGOL DISTRIBUCIONES",
             "distrimarcasagentecomercial": "DISTRIMARCAS",
-            "jyddistribuciones": "JYD DISTRIBUCIONES"
+            "jyddistribuciones": "JYD DISTRIBUCIONES",
+            "lideraliados": "LIDERALIADOS"
         }
         
         return agent_names.get(subdomain, subdomain.upper())
